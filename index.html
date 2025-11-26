@@ -46,22 +46,23 @@
         setLogLevel('debug');
         
         // --- CONFIGURACIÓN DE CONSTANTES GLOBALES Y UTILIDADES ---
-        
-        // ** V A R I A B L E S   D E   C O N F I G U R A C I Ó N **
-        // SI NO ESTÁS EN UN ENTORNO CON VARIABLES GLOBALES (__app_id, __firebase_config, etc.),
-        // DEBES DESCOMENTAR Y PEGAR TU CONFIGURACIÓN DE FIREBASE AQUÍ:
-        /*
-        const appId = 'bingo-lineas-app'; // Un ID único para tu juego
-        const firebaseConfig = {
-             apiKey: "TU_API_KEY_AQUI",
-             authDomain: "TU_AUTH_DOMAIN_AQUI",
-             projectId: "TU_PROJECT_ID_AQUI",
-             storageBucket: "TU_STORAGE_BUCKET_AQUI",
-             messagingSenderId: "TU_MESSAGING_SENDER_ID_AQUI",
-             appId: "TU_APP_ID_AQUI"
-        };
-        const initialAuthToken = null;
-        */
+       // Import the functions you need from the SDKs you need
+import { initializeApp } from "firebase/app";
+// TODO: Add SDKs for Firebase products that you want to use
+// https://firebase.google.com/docs/web/setup#available-libraries
+
+// Your web app's Firebase configuration
+const firebaseConfig = {
+  apiKey: "AIzaSyDWZj-48c811N_cyJVZheSEG-hhX5mYkos",
+  authDomain: "omegalineas.firebaseapp.com",
+  projectId: "omegalineas",
+  storageBucket: "omegalineas.firebasestorage.app",
+  messagingSenderId: "211648014130",
+  appId: "1:211648014130:web:02826080e183158873d92b"
+};
+
+// Initialize Firebase
+const app = initializeApp(firebaseConfig);
         
         // Variables globales proporcionadas por el entorno de Canvas (MANDATORIO USAR)
         const appId = typeof __app_id !== 'undefined' ? __app_id : 'bingo-lineas-app';
@@ -78,7 +79,7 @@
         const MAX_IMAGE_SIZE_BYTES = 750 * 1024; // 750 KB
         
         // ** CLAVE SECRETA DE ADMINISTRADOR ** (¡Cámbiala por una clave fuerte!)
-        const ADMIN_SECRET_PASSPHRASE = 'CLAVE-SECRETA-BINGO';
+        const ADMIN_SECRET_PASSPHRASE = 'LinesAA1428';
         
         const WINNING_LINES = [
             [1, 16, 31, 46, 61], [2, 17, 32, 47, 62], [3, 18, 33, 48, 63], [4, 19, 34, 49, 64], 
