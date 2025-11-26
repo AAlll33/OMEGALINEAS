@@ -1,0 +1,1096 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bingo de Líneas Colaborativo</title>
+    <!-- Carga de Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Configuración de fuente Inter -->
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@100..900&display=swap');
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #111827; /* gray-900 */
+            color: white;
+        }
+        .modal-animate {
+            animation: fadeIn 0.3s ease-out, zoomIn 0.3s ease-out;
+        }
+        @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+        @keyframes zoomIn { from { transform: scale(0.95); } to { transform: scale(1); } }
+        /* Animación para el botón de admin después de 11 clics */
+        .chile-pulse {
+            animation: pulse 1s infinite;
+        }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+    </style>
+</head>
+<body>
+    <div id="app" class="min-h-screen p-4 sm:p-6 md:p-8">
+        <!-- Contenido principal cargado por JS -->
+    </div>
+
+    <!-- Modal Container -->
+    <div id="modal-root"></div>
+
+    <script type="module">
+        // --- FIREBASE IMPORTS (CDN) ---
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, getDoc, setDoc, onSnapshot, collection, writeBatch, updateDoc, arrayUnion } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js"; // Para debug
+        setLogLevel('debug');
+        
+        // --- CONFIGURACIÓN DE CONSTANTES GLOBALES Y UTILIDADES ---
+        
+        // Variables globales proporcionadas por el entorno de Canvas (MANDATORIO USAR)
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'bingo-lineas-app';
+        const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        // Rutas de Firestore
+        const COLLECTION_PATH = `artifacts/${appId}/public/data/bingo_slots`;
+        const GAME_STATE_DOC_PATH = `artifacts/${appId}/public/data/game_state`;
+        const ADMIN_LIST_DOC_PATH = `artifacts/${appId}/public/data/admins`; // Nueva ruta para administradores
+        
+        const NUM_SLOTS = 15;
+        
+        // ** CLAVE SECRETA DE ADMINISTRADOR ** (¡Cámbiala por una clave fuerte!)
+        const ADMIN_SECRET_PASSPHRASE = 'CLAVE-SECRETA-BINGO';
+        
+        const WINNING_LINES = [
+            [1, 16, 31, 46, 61], [2, 17, 32, 47, 62], [3, 18, 33, 48, 63], [4, 19, 34, 49, 64], 
+            [5, 20, 35, 50, 65], [6, 21, 36, 51, 66], [7, 22, 37, 52, 67], [8, 23, 38, 53, 68], 
+            [9, 24, 39, 54, 69], [10, 25, 40, 55, 70], [11, 26, 41, 56, 71], [12, 27, 42, 57, 72], 
+            [13, 28, 43, 58, 73], [14, 29, 44, 59, 74], [15, 30, 45, 60, 75],
+        ];
+        
+        const LETTER_COLORS = {
+            B: 'bg-blue-500', I: 'bg-red-500', N: 'bg-green-500', G: 'bg-yellow-500', O: 'bg-purple-500',
+        };
+
+        const getBingoInfo = (number) => {
+            let letter = ''; let color = '';
+            if (number >= 1 && number <= 15) { letter = 'B'; color = LETTER_COLORS.B; } 
+            else if (number >= 16 && number <= 30) { letter = 'I'; color = LETTER_COLORS.I; } 
+            else if (number >= 31 && number <= 45) { letter = 'N'; color = LETTER_COLORS.N; } 
+            else if (number >= 46 && number <= 60) { letter = 'G'; color = LETTER_COLORS.G; } 
+            else if (number >= 61 && number <= 75) { letter = 'O'; color = LETTER_COLORS.O; }
+            return { letter, color };
+        };
+
+        // --- ESTADO GLOBAL DE LA APLICACIÓN ---
+        const state = {
+            db: null,
+            auth: null,
+            userId: null,
+            adminUserIds: [], // IDs de los usuarios autorizados como admin (desde Firestore)
+            isAdmin: false,
+            slots: [],
+            loading: true,
+            message: '',
+            selectedSlot: null,
+            route: window.location.hash || '#', // Manejo de la ruta simulada
+            clickCount: 0, // Contador para el truco de admin
+        };
+
+        // --- MANEJO DEL DOM/RENDERING ---
+
+        const $ = (selector) => document.querySelector(selector);
+        const $$ = (selector) => document.querySelectorAll(selector);
+
+        /**
+         * Actualiza el estado global y llama a renderizar la aplicación.
+         */
+        function updateState(newState, render = true) {
+            Object.assign(state, newState);
+            if (render) renderApp();
+        }
+
+        /**
+         * Renderiza el Botón de Slot HTML
+         */
+        function renderSlotButton(slot) {
+            const line = WINNING_LINES[slot.id - 1];
+            const isReserved = !!slot.reservedBy;
+            const isOwnSlot = isReserved && slot.reservedBy === state.userId;
+            
+            let statusClass = 'bg-gray-700 text-gray-300 hover:bg-gray-600';
+            if (isReserved) {
+                if (slot.paymentStatus === 'paid') {
+                    statusClass = 'bg-green-600 text-white shadow-xl shadow-green-900/50';
+                } else if (slot.paymentStatus === 'pending') {
+                    statusClass = 'bg-yellow-600 text-gray-900 shadow-xl shadow-yellow-900/50';
+                } else if (slot.paymentStatus === 'admin') {
+                    statusClass = 'bg-indigo-600 text-white shadow-xl shadow-indigo-900/50';
+                } else {
+                    statusClass = 'bg-red-600 text-white shadow-xl shadow-red-900/50';
+                }
+            }
+
+            const baseStyle = 'p-2 rounded-xl text-center font-extrabold transition-all duration-300 transform shadow-md relative';
+            const cursorClass = isReserved && !isOwnSlot ? 'cursor-default' : 'hover:scale-[1.02] active:scale-95 cursor-pointer';
+
+            return `
+                <button 
+                    class="${baseStyle} ${statusClass} ${cursorClass}"
+                    data-slot-id="${slot.id}"
+                    ${isReserved && !isOwnSlot ? 'disabled' : ''}
+                >
+                    <div class="flex justify-between items-center mb-1">
+                        <span class="text-sm font-light">Ficha ${slot.id}</span>
+                        ${isReserved ? 
+                            `<span class="text-xs font-semibold ${slot.paymentStatus === 'pending' ? 'text-gray-900' : 'text-white'}">
+                                ${isOwnSlot ? "¡TUYA!" : slot.playerName.substring(0, 10) + (slot.playerName.length > 10 ? '...' : '')}
+                            </span>` 
+                            : ''
+                        }
+                    </div>
+                    <div class="text-xl tracking-wider mb-2">
+                        ${isReserved ? slot.playerName : "¡RESERVAR!"}
+                    </div>
+                    <div class="flex justify-center space-x-0.5">
+                        ${line.map(num => {
+                            const { letter, color } = getBingoInfo(num);
+                            return `
+                                <div class="w-6 h-6 flex items-center justify-center text-xs font-bold rounded-full text-white border-2 border-gray-800 ${color}" title="Columna ${letter}">
+                                    ${letter}
+                                </div>
+                            `;
+                        }).join('')}
+                    </div>
+                    ${isReserved && slot.paymentStatus !== 'reserved' ? 
+                        `<span class="mt-1 text-[10px] uppercase font-bold block ${slot.paymentStatus === 'paid' ? 'text-white' : 'text-gray-900'}">
+                            ${slot.paymentStatus === 'paid' ? 'PAGADO' : slot.paymentStatus === 'pending' ? 'PENDIENTE' : slot.paymentStatus === 'admin' ? 'ADMIN' : 'RESERVADO'}
+                        </span>`
+                        : ''
+                    }
+                    ${isOwnSlot && slot.paymentStatus === 'pending' ? `
+                        <div class="absolute inset-0 bg-black/70 flex items-center justify-center rounded-xl transition duration-300 opacity-0 hover:opacity-100">
+                            <button 
+                                class="upload-proof-btn bg-yellow-500 text-black px-3 py-1 text-xs font-bold rounded-full shadow-lg hover:bg-yellow-400"
+                                data-slot-id="${slot.id}"
+                            >
+                                Subir Captura Pago
+                            </button>
+                        </div>
+                    ` : ''}
+                </button>
+            `;
+        }
+
+        /**
+         * Renderiza el Modal de Reserva
+         */
+        function renderReservationModal(slotNumber) {
+            const line = WINNING_LINES[slotNumber - 1];
+            const modalRoot = $('#modal-root');
+
+            const modalHtml = `
+                <div id="reservation-modal" class="fixed inset-0 bg-black/70 z-50 flex items-center justify-center p-4">
+                    <div class="bg-white p-6 rounded-2xl w-full max-w-sm shadow-2xl modal-animate" id="modal-content">
+                        <h3 class="text-2xl font-bold mb-2 text-indigo-700">Reservar Ficha ${slotNumber}</h3>
+                        <p class="text-sm text-gray-600 mb-4">Esta ficha gana si se completan:</p>
+                        
+                        <form id="reservation-form">
+                            <label for="playerName" class="block text-sm font-medium text-gray-700 mb-2">Tu Nombre o Alias</label>
+                            <input
+                                id="playerName"
+                                type="text"
+                                required
+                                maxlength="25"
+                                placeholder="Ej: La Reina del Bingo"
+                                class="w-full p-3 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500 text-gray-800"
+                            />
+                            <div class="mt-6 flex justify-between space-x-3">
+                                <button type="button" id="modal-cancel-btn" class="flex-1 px-4 py-2 text-sm font-semibold rounded-lg bg-gray-200 text-gray-700 hover:bg-gray-300 transition">
+                                    Cancelar
+                                </button>
+                                <button type="submit" id="modal-confirm-btn" class="flex-1 px-4 py-2 text-sm font-semibold rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 transition disabled:bg-indigo-400 flex items-center justify-center" disabled>
+                                    Confirmar Reserva
+                                </button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            `;
+            modalRoot.innerHTML = modalHtml;
+
+            // Attach event listeners for the modal
+            const modalElement = $('#reservation-modal');
+            const contentElement = $('#modal-content');
+            const cancelBtn = $('#modal-cancel-btn');
+            const form = $('#reservation-form');
+            const playerNameInput = $('#playerName');
+            const confirmBtn = $('#modal-confirm-btn');
+
+            modalElement.addEventListener('click', (e) => {
+                if (e.target.id === 'reservation-modal') closeModal();
+            });
+            contentElement.addEventListener('click', (e) => e.stopPropagation());
+            cancelBtn.addEventListener('click', closeModal);
+
+            playerNameInput.addEventListener('input', () => {
+                confirmBtn.disabled = playerNameInput.value.trim() === '';
+            });
+
+            form.addEventListener('submit', async (e) => {
+                e.preventDefault();
+                const name = playerNameInput.value.trim();
+                if (name) {
+                    confirmBtn.innerHTML = `
+                        <svg class="animate-spin h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
+                        Reservando...
+                    `;
+                    confirmBtn.disabled = true;
+                    playerNameInput.disabled = true;
+                    await handleReserveSlot(slotNumber, name);
+                    // handleReserveSlot calls closeModal internally
+                }
+            });
+        }
+        
+        /**
+         * Renderiza el Modal de Subida de Prueba de Pago
+         */
+        function renderPaymentProofModal(slotNumber) {
+            const slot = state.slots.find(s => s.id === slotNumber);
+            if (!slot || slot.reservedBy !== state.userId) {
+                updateState({ message: "Error: No puedes subir prueba de pago para un slot que no es tuyo." });
+                return;
+            }
+            const modalRoot = $('#modal-root');
+
+            const modalHtml = `
+                <div id="proof-modal" class="fixed inset-0 bg-black/70 z-50 flex items-center justify-center p-4">
+                    <div class="bg-white p-6 rounded-2xl w-full max-w-sm shadow-2xl modal-animate" id="modal-content">
+                        <h3 class="text-2xl font-bold mb-2 text-yellow-700">Subir Captura Pago (Ficha ${slotNumber})</h3>
+                        <p class="text-sm text-gray-600 mb-4">Pega la URL pública (ej: Imgur, Drive, etc.) de tu comprobante de pago.</p>
+                        
+                        <form id="proof-form">
+                            <label for="proofUrl" class="block text-sm font-medium text-gray-700 mb-2">URL del Comprobante</label>
+                            <input
+                                id="proofUrl"
+                                type="url"
+                                required
+                                placeholder="https://ejemplo.com/captura.png"
+                                class="w-full p-3 border border-gray-300 rounded-lg focus:ring-yellow-500 focus:border-yellow-500 text-gray-800"
+                                value="${slot.paymentProofUrl || ''}"
+                            />
+                            <div class="mt-6 flex justify-between space-x-3">
+                                <button type="button" id="modal-cancel-btn" class="flex-1 px-4 py-2 text-sm font-semibold rounded-lg bg-gray-200 text-gray-700 hover:bg-gray-300 transition">
+                                    Cancelar
+                                </button>
+                                <button type="submit" id="modal-confirm-btn" class="flex-1 px-4 py-2 text-sm font-semibold rounded-lg bg-yellow-600 text-white hover:bg-yellow-700 transition disabled:bg-yellow-400 flex items-center justify-center">
+                                    ${slot.paymentProofUrl ? 'Actualizar Comprobante' : 'Enviar Comprobante'}
+                                </button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            `;
+            modalRoot.innerHTML = modalHtml;
+
+            const cancelBtn = $('#modal-cancel-btn');
+            const form = $('#proof-form');
+            const proofUrlInput = $('#proofUrl');
+            const confirmBtn = $('#modal-confirm-btn');
+
+            cancelBtn.addEventListener('click', closeModal);
+            form.addEventListener('submit', async (e) => {
+                e.preventDefault();
+                const url = proofUrlInput.value.trim();
+                if (url) {
+                    confirmBtn.innerHTML = `
+                        <svg class="animate-spin h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
+                        Enviando...
+                    `;
+                    confirmBtn.disabled = true;
+                    proofUrlInput.disabled = true;
+                    await handleUploadPaymentProof(slotNumber, url);
+                    closeModal();
+                }
+            });
+        }
+        
+        /**
+         * Renderiza el Modal de Login de Administrador
+         */
+        function renderAdminLoginModal() {
+            const modalRoot = $('#modal-root');
+
+            const modalHtml = `
+                <div id="admin-login-modal" class="fixed inset-0 bg-black/70 z-50 flex items-center justify-center p-4">
+                    <div class="bg-white p-6 rounded-2xl w-full max-w-sm shadow-2xl modal-animate" id="modal-content">
+                        <h3 class="text-2xl font-bold mb-2 text-red-700">Acceso Secreto Administrador</h3>
+                        <p class="text-sm text-gray-600 mb-4">Ingresa la frase secreta de administrador.</p>
+                        <p class="text-xs text-red-500 mb-4 font-semibold">¡ADVERTENCIA! Esto asocia tu ID de sesión actual (${state.userId.substring(0, 8)}...) como administrador permanente.</p>
+                        
+                        <form id="admin-login-form">
+                            <label for="adminPassphrase" class="block text-sm font-medium text-gray-700 mb-2">Frase Secreta</label>
+                            <input
+                                id="adminPassphrase"
+                                type="password"
+                                required
+                                placeholder="Ingresa la clave secreta aquí"
+                                class="w-full p-3 border border-gray-300 rounded-lg focus:ring-red-500 focus:border-red-500 text-gray-800"
+                            />
+                            <div class="mt-6 flex justify-between space-x-3">
+                                <button type="button" id="modal-cancel-btn" class="flex-1 px-4 py-2 text-sm font-semibold rounded-lg bg-gray-200 text-gray-700 hover:bg-gray-300 transition">
+                                    Cancelar
+                                </button>
+                                <button type="submit" id="modal-confirm-btn" class="flex-1 px-4 py-2 text-sm font-semibold rounded-lg bg-red-600 text-white hover:bg-red-700 transition disabled:bg-red-400 flex items-center justify-center">
+                                    Activar Admin
+                                </button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            `;
+            modalRoot.innerHTML = modalHtml;
+
+            const cancelBtn = $('#modal-cancel-btn');
+            const form = $('#admin-login-form');
+            const passphraseInput = $('#adminPassphrase');
+            const confirmBtn = $('#modal-confirm-btn');
+
+            cancelBtn.addEventListener('click', closeModal);
+            form.addEventListener('submit', async (e) => {
+                e.preventDefault();
+                const passphrase = passphraseInput.value.trim();
+                
+                confirmBtn.disabled = true;
+                confirmBtn.textContent = 'Verificando...';
+
+                if (passphrase === ADMIN_SECRET_PASSPHRASE) {
+                    await handleAdminLogin();
+                } else {
+                    confirmBtn.textContent = 'Clave Incorrecta';
+                    passphraseInput.value = '';
+                    setTimeout(() => {
+                        confirmBtn.textContent = 'Activar Admin';
+                        confirmBtn.disabled = false;
+                    }, 1500);
+                }
+            });
+        }
+        
+        /**
+         * Cierra el modal actual y resetea el slot seleccionado.
+         */
+        function closeModal() {
+            updateState({ selectedSlot: null, message: '' }, false);
+            $('#modal-root').innerHTML = '';
+        }
+
+        /**
+         * Renderiza la tabla de reservas.
+         */
+        function renderReservationTable() {
+            const reservedSlots = state.slots.filter(slot => slot.reservedBy);
+            const isAdmin = state.isAdmin;
+
+            if (reservedSlots.length === 0) {
+                return `<p class="text-center text-gray-500 italic mt-8">Aún no hay reservas.</p>`;
+            }
+
+            const rows = reservedSlots.map(slot => {
+                const line = WINNING_LINES[slot.id - 1];
+                const isOwner = slot.reservedBy === state.userId;
+                
+                let statusText = '';
+                let statusColor = '';
+                switch (slot.paymentStatus) {
+                    case 'paid': statusText = 'PAGADO'; statusColor = 'bg-green-100 text-green-800'; break;
+                    case 'pending': statusText = 'PENDIENTE'; statusColor = 'bg-yellow-100 text-yellow-800'; break;
+                    case 'admin': statusText = 'RESERVADO (ADMIN)'; statusColor = 'bg-indigo-100 text-indigo-800'; break;
+                    default: statusText = 'RESERVADO'; statusColor = 'bg-red-100 text-red-800';
+                }
+                
+                const proofLink = slot.paymentProofUrl ? `
+                    <a href="${slot.paymentProofUrl}" target="_blank" class="text-blue-600 hover:text-blue-800 text-xs font-semibold truncate block max-w-[150px]">
+                        Ver Captura
+                    </a>` : `<span class="text-gray-500 text-xs">Sin subir</span>`;
+                
+                return `
+                    <tr class="${isOwner ? 'bg-indigo-50 font-medium' : 'hover:bg-gray-50 text-gray-800'}">
+                        <td class="px-3 py-2 whitespace-nowrap text-sm text-gray-900">${slot.id}</td>
+                        <td class="px-3 py-2 whitespace-nowrap text-sm text-gray-900">
+                            ${slot.playerName} 
+                            ${isOwner ? '<span class="ml-2 text-xs font-bold text-indigo-600">(Tú)</span>' : ''}
+                        </td>
+                        <td class="px-3 py-2 whitespace-nowrap text-xs">
+                            ${line.map(num => getBingoInfo(num).letter).join('')}
+                        </td>
+                        <td class="px-3 py-2 whitespace-nowrap">
+                            <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${statusColor}">
+                                ${statusText}
+                            </span>
+                        </td>
+                        ${isAdmin ? `
+                            <td class="px-3 py-2 whitespace-nowrap text-center text-sm">
+                                ${proofLink}
+                            </td>
+                            <td class="px-3 py-2 whitespace-nowrap text-center text-sm font-medium">
+                                ${slot.paymentStatus === 'paid' ? `
+                                    <button data-slot-id="${slot.id}" data-status="reserved" class="admin-payment-btn text-red-600 hover:text-red-900 text-xs font-semibold">
+                                        Desactivar
+                                    </button>` 
+                                    : `
+                                    <button data-slot-id="${slot.id}" data-status="paid" class="admin-payment-btn text-green-600 hover:text-green-900 text-xs font-semibold" ${!slot.paymentProofUrl ? 'disabled title="Esperando comprobante"' : ''}>
+                                        Confirmar
+                                    </button>`
+                                }
+                            </td>` : ''
+                        }
+                    </tr>
+                `;
+            }).join('');
+
+            return `
+                <div class="mt-8">
+                    <h4 class="text-2xl font-bold mb-4 ${isAdmin ? 'text-red-400' : 'text-indigo-400'} border-b pb-2">
+                        Reservas (${reservedSlots.length}/${NUM_SLOTS})
+                    </h4>
+                    <div class="overflow-x-auto rounded-xl shadow-2xl">
+                        <table class="min-w-full bg-white divide-y divide-gray-200">
+                            <thead class="${isAdmin ? 'bg-red-600' : 'bg-indigo-600'} text-white">
+                                <tr>
+                                    <th class="px-3 py-3 text-xs font-semibold uppercase tracking-wider text-left">Ficha</th>
+                                    <th class="px-3 py-3 text-xs font-semibold uppercase tracking-wider text-left">Jugador</th>
+                                    <th class="px-3 py-3 text-xs font-semibold uppercase tracking-wider text-left">Línea</th>
+                                    <th class="px-3 py-3 text-xs font-semibold uppercase tracking-wider text-left">Estado Pago</th>
+                                    ${isAdmin ? `<th class="px-3 py-3 text-xs font-semibold uppercase tracking-wider text-center">Comprobante</th>` : ''}
+                                    ${isAdmin ? '<th class="px-3 py-3 text-xs font-semibold uppercase tracking-wider text-center">Acción Admin</th>' : ''}
+                                </tr>
+                            </thead>
+                            <tbody class="bg-white divide-y divide-gray-100">
+                                ${rows}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            `;
+        }
+        
+        /**
+         * Renderiza la vista del Jugador (Ruta #)
+         */
+        function renderPlayerView() {
+            const reservedCount = state.slots.filter(s => s.reservedBy).length;
+            const isGameFull = reservedCount === NUM_SLOTS;
+            const allPaid = isGameFull && state.slots.every(s => s.paymentStatus === 'paid');
+
+            const infoCard = renderInfoCard();
+            const reservationTable = state.slots.some(s => s.reservedBy) ? renderReservationTable() : '';
+            
+            return `
+                ${infoCard}
+
+                <div id="slots-grid" class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
+                    ${state.slots.map(renderSlotButton).join('')}
+                </div>
+
+                ${reservationTable}
+                
+                ${isGameFull && allPaid ? renderGameReadyBanner() : ''}
+            `;
+        }
+        
+        /**
+         * Renderiza la vista del Administrador (Ruta #admin)
+         */
+        function renderAdminView() {
+            if (!state.isAdmin) {
+                // Si no es admin y está en la ruta #admin, muestra un mensaje
+                return `
+                    <div class="text-center mt-20 p-8 bg-red-900/40 border border-red-600 rounded-xl max-w-lg mx-auto">
+                        <h2 class="text-3xl font-black text-red-400 mb-4">Acceso Denegado</h2>
+                        <p class="text-gray-300">No tienes privilegios de administrador para ver este panel.</p>
+                        <p class="mt-4 text-sm text-gray-500">
+                            Para volver al modo jugador: 
+                            <a href="#" class="text-blue-400 hover:underline font-semibold">Volver a Home</a>
+                        </p>
+                    </div>
+                `;
+            }
+
+            const infoCard = renderInfoCard();
+            const reservationTable = renderReservationTable();
+
+            return `
+                <header class="text-center mb-8 pt-4">
+                    <h1 class="text-4xl font-black text-red-400 drop-shadow-lg">
+                        <span class="text-indigo-500">ADMIN</span> PANEL BINGO 🛠️
+                    </h1>
+                    <p class="text-gray-400 mt-2 text-sm italic">
+                        Tu ID: <span class="text-yellow-400">${state.userId}</span>
+                    </p>
+                    <p class="text-sm mt-4">
+                        <a href="#" class="text-blue-400 hover:underline font-semibold">Volver a vista Jugador</a>
+                    </p>
+                </header>
+
+                ${infoCard}
+                ${reservationTable}
+            `;
+        }
+
+        /**
+         * Renderiza la Tarjeta de Información/Estado
+         */
+        function renderInfoCard() {
+            const reservedCount = state.slots.filter(s => s.reservedBy).length;
+            const isGameFull = reservedCount === NUM_SLOTS;
+            const allPaid = isGameFull && state.slots.every(s => s.paymentStatus === 'paid');
+            const isAdmin = state.isAdmin;
+            const isPlayerView = state.route === '#';
+
+            let message = '¡Reserva tu Ficha!';
+            let styleClass = 'bg-blue-900/50 border-blue-500 text-blue-300';
+            let subMessage = 'Selecciona una ficha disponible (botón gris) para asegurar tu línea.';
+            
+            if (!isPlayerView) {
+                message = `MODO ADMIN: ${reservedCount} slots reservados.`;
+                styleClass = 'bg-red-900/50 border-red-600 text-red-300';
+                subMessage = 'Control de pagos y reinicio de partida.';
+            } else if (isGameFull) {
+                if (allPaid) {
+                    message = '¡PARTIDA LISTA (PICANTE)!';
+                    styleClass = 'bg-red-900/50 border-red-600 text-red-300 animate-pulse';
+                    subMessage = '¡Las 15 fichas están reservadas y PAGADAS! El juego comenzará pronto.';
+                } else {
+                    message = '¡LISTA LLENA!';
+                    styleClass = 'bg-yellow-900/50 border-yellow-600 text-yellow-300';
+                    subMessage = 'Esperando la confirmación de pago. Sube tu comprobante si aún no lo has hecho.';
+                }
+            }
+
+            const adminPanel = isAdmin && !isPlayerView ? `
+                <div id="admin-panel" class="mt-4 pt-4 border-t border-dashed border-gray-600">
+                    <button id="reset-game-btn" class="w-full px-4 py-2 text-sm font-semibold rounded-lg bg-red-600 text-white hover:bg-red-700 transition">
+                        Reiniciar Partida (Admin)
+                    </button>
+                    <div id="reset-confirmation" class="hidden flex space-x-2 mt-2">
+                        <button id="cancel-reset-btn" class="flex-1 px-4 py-2 text-sm font-semibold rounded-lg bg-gray-400 text-white hover:bg-gray-500 transition">
+                            Cancelar
+                        </button>
+                        <button id="confirm-reset-btn" class="flex-1 px-4 py-2 text-sm font-semibold rounded-lg bg-red-800 text-white hover:bg-red-900 transition">
+                            CONFIRMAR REINICIO
+                        </button>
+                    </div>
+                </div>
+            ` : '';
+
+            return `
+                <div class="p-4 border-l-4 rounded-lg shadow-xl ${styleClass} mb-6">
+                    <h4 class="font-extrabold text-xl mb-1 flex items-center justify-center">
+                        ${message}
+                    </h4>
+                    <p class="text-sm text-center italic">${subMessage}</p>
+                    ${adminPanel}
+                </div>
+            `;
+        }
+        
+        function renderGameReadyBanner() {
+            return `
+                <div class="mt-12 p-6 bg-red-900/40 rounded-3xl shadow-2xl border-4 border-red-500 animate-pulse">
+                    <h3 class="text-3xl font-black text-center text-red-300 mb-4">
+                        ¡PARTIDA LISTA!
+                    </h3>
+                    <p class="text-lg text-center text-red-200 mb-6">
+                        ¡Todas las fichas están pagadas y el juego puede comenzar!
+                    </p>
+                    <div class="bg-red-900 p-4 rounded-xl border border-red-700 shadow-inner">
+                        <h4 class="text-xl font-bold text-yellow-300 mb-3">Reservas Confirmadas:</h4>
+                        <ul class="space-y-1 text-red-100">
+                            ${state.slots.filter(s => s.paymentStatus === 'paid').map(slot => `
+                                <li class="flex justify-between border-b border-red-800 pb-1 text-sm">
+                                    <span>🌶️ Ficha ${slot.id} (${WINNING_LINES[slot.id-1].map(num => getBingoInfo(num).letter).join('')})</span>
+                                    <span class="font-semibold">${slot.playerName.toUpperCase()}</span>
+                                </li>
+                            `).join('')}
+                        </ul>
+                    </div>
+                </div>
+            `;
+        }
+
+        /**
+         * Función principal de renderizado que reconstruye el DOM.
+         */
+        function renderApp() {
+            const app = $('#app');
+            if (!app) return;
+
+            if (state.loading) {
+                app.innerHTML = `
+                    <div class="flex justify-center items-center h-screen">
+                        <svg class="animate-spin -ml-1 mr-3 h-8 w-8 text-indigo-400" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
+                        Cargando datos y autenticando...
+                    </div>
+                `;
+                return;
+            }
+            
+            let content = '';
+            // 1. Encabezado y Meta-Info
+            if (state.route === '#admin' && state.isAdmin) {
+                content = renderAdminView();
+            } else if (state.route === '#admin' && !state.isAdmin) {
+                 content = renderAdminView(); // Muestra el mensaje de acceso denegado
+            } else {
+                content = `
+                    <header class="text-center mb-8 pt-4">
+                        <h1 id="app-title" class="text-4xl font-black text-indigo-400 drop-shadow-lg cursor-pointer">
+                            <span class="text-red-500">OMEGA</span> BINGO LÍNEAS 
+                            <span class="${state.clickCount >= 9 ? 'chile-pulse' : ''}">🌶️</span>
+                        </h1>
+                        <p class="text-gray-400 mt-2 text-sm italic">
+                            Total de fichas: ${state.slots.filter(s => s.reservedBy).length} de ${NUM_SLOTS} reservadas.
+                        </p>
+                        <p class="text-xs mt-1 text-gray-500">
+                            ¡Bienvenido! 
+                            ${state.isAdmin ? 
+                                `<a href="#admin" class="text-yellow-400 font-bold hover:underline">Ir a Panel Admin</a>` : 
+                                '<span class="text-gray-500 italic">Clic 11 veces en el chile para Admin Login.</span>'
+                            }
+                        </p>
+                    </header>
+                    ${state.message ? `
+                        <div class="mb-4 p-3 bg-indigo-900/50 text-indigo-300 rounded-lg text-sm text-center font-medium shadow-inner animate-in slide-in-from-top">
+                            ${state.message}
+                        </div>
+                    ` : ''}
+                    ${renderPlayerView()}
+                `;
+            }
+
+            app.innerHTML = content;
+            
+            attachEventListeners();
+            
+            if (state.selectedSlot !== null) {
+                const slot = state.slots.find(s => s.id === state.selectedSlot);
+                if (slot && slot.reservedBy === state.userId && slot.paymentStatus === 'pending') {
+                    renderPaymentProofModal(state.selectedSlot);
+                } else if (slot && !slot.reservedBy) {
+                    renderReservationModal(state.selectedSlot);
+                }
+            }
+        }
+        
+        /**
+         * Maneja el truco de 11 clics en el chile (🌶️)
+         */
+        function handleSecretClick() {
+            if (state.isAdmin) {
+                window.location.hash = '#admin';
+                return;
+            }
+
+            let newCount = state.clickCount + 1;
+            updateState({ clickCount: newCount }, false); // Actualizar sin re-renderizar todo
+            
+            const titleElement = $('#app-title');
+            if (titleElement) {
+                const chileSpan = titleElement.querySelector('span:last-child');
+                if (newCount >= 9) {
+                    chileSpan.classList.add('chile-pulse');
+                    if (newCount === 11) {
+                        updateState({ clickCount: 0 });
+                        renderAdminLoginModal();
+                    }
+                } else {
+                    chileSpan.classList.remove('chile-pulse');
+                }
+            }
+        }
+        
+        /**
+         * Inicializa todos los listeners del DOM.
+         */
+        function attachEventListeners() {
+            // Reiniciar el contador de clics al inicio del renderizado (a menos que ya esté cerca del 11)
+            if (state.clickCount < 9 && state.clickCount !== 0) {
+                 updateState({ clickCount: 0 }, false);
+            }
+            
+            // 1. Listener para el truco de Admin (Solo en la vista de Jugador)
+            if (state.route === '#') {
+                const title = $('#app-title');
+                if (title) {
+                    title.onclick = handleSecretClick;
+                }
+            }
+            
+            // 2. Event listener para botones de slot (Delegación)
+            const slotsGrid = $('#slots-grid');
+            if (slotsGrid) {
+                slotsGrid.addEventListener('click', (e) => {
+                    const button = e.target.closest('button');
+                    if (button && !button.disabled) {
+                        const slotId = parseInt(button.dataset.slotId);
+                        if (!isNaN(slotId)) {
+                            const slot = state.slots.find(s => s.id === slotId);
+                            if (slot.reservedBy === state.userId && slot.paymentStatus === 'pending') {
+                                // Abre modal de subida de prueba de pago
+                                updateState({ selectedSlot: slotId });
+                            } else if (!slot.reservedBy) {
+                                // Abre modal de reserva
+                                updateState({ selectedSlot: slotId });
+                            }
+                        }
+                    }
+                });
+                
+                // Listener para el botón de subir prueba que aparece al hacer hover
+                slotsGrid.addEventListener('click', (e) => {
+                    const uploadBtn = e.target.closest('.upload-proof-btn');
+                    if (uploadBtn) {
+                        const slotId = parseInt(uploadBtn.dataset.slotId);
+                        updateState({ selectedSlot: slotId });
+                    }
+                });
+            }
+
+            // 3. Event listeners para el panel de administración (Solo si está en vista Admin y es admin)
+            if (state.isAdmin && state.route === '#admin') {
+                // Reinicio de juego
+                const resetBtn = $('#reset-game-btn');
+                const resetConfirmation = $('#reset-confirmation');
+                const cancelResetBtn = $('#cancel-reset-btn');
+                const confirmResetBtn = $('#confirm-reset-btn');
+
+                if (resetBtn) {
+                    resetBtn.onclick = () => {
+                        resetBtn.classList.add('hidden');
+                        resetConfirmation.classList.remove('hidden');
+                    };
+                    cancelResetBtn.onclick = () => {
+                        resetBtn.classList.remove('hidden');
+                        resetConfirmation.classList.add('hidden');
+                    };
+                    confirmResetBtn.onclick = async () => {
+                        confirmResetBtn.disabled = true;
+                        await handleResetGame();
+                    };
+                }
+                
+                // Actualización de pago
+                $$('.admin-payment-btn').forEach(btn => {
+                    btn.onclick = async (e) => {
+                        const slotId = parseInt(e.target.dataset.slotId);
+                        const newStatus = e.target.dataset.status;
+                        e.target.disabled = true;
+                        e.target.textContent = 'Actualizando...';
+                        await handleUpdatePayment(slotId, newStatus);
+                    };
+                });
+            }
+        }
+
+        // --- LÓGICA DE RUTAS ---
+        function handleHashChange() {
+            const hash = window.location.hash || '#';
+            updateState({ route: hash });
+        }
+        window.onhashchange = handleHashChange;
+
+        // --- LÓGICA DE FIRESTORE ---
+        
+        /**
+         * Intenta dar acceso de administrador al usuario actual si la clave secreta fue correcta.
+         */
+        async function handleAdminLogin() {
+            if (!state.db || !state.userId) {
+                updateState({ message: "Error: DB no lista o no autenticado." });
+                return;
+            }
+
+            const adminRef = doc(state.db, ADMIN_LIST_DOC_PATH, 'authorized');
+            try {
+                // Añade el ID del usuario actual al array en Firestore
+                await updateDoc(adminRef, { 
+                    ids: arrayUnion(state.userId) 
+                });
+                
+                // Actualiza el estado local y redirige al panel de admin
+                updateState({ 
+                    isAdmin: true, 
+                    adminUserIds: [...state.adminUserIds, state.userId],
+                    message: "¡Admin Login Exitoso! Accediendo al panel..." 
+                });
+                closeModal();
+                window.location.hash = '#admin';
+            } catch (error) {
+                // Esto podría fallar si el documento 'authorized' no existe. Lo creamos.
+                if (error.code === 'not-found') {
+                    await setDoc(adminRef, { ids: [state.userId] });
+                    updateState({ 
+                        isAdmin: true, 
+                        adminUserIds: [state.userId],
+                        message: "¡Admin Login Exitoso! Documento admin creado y accediendo al panel..." 
+                    });
+                    closeModal();
+                    window.location.hash = '#admin';
+                } else {
+                    console.error("Error al conceder acceso admin:", error);
+                    updateState({ message: "Error al intentar conceder acceso admin." });
+                }
+            }
+        }
+
+        /**
+         * Recupera la lista de IDs de administrador.
+         */
+        async function fetchAdminUserIds(firestore) {
+            const adminRef = doc(firestore, ADMIN_LIST_DOC_PATH, 'authorized');
+            try {
+                const docSnap = await getDoc(adminRef);
+                const ids = docSnap.exists() ? docSnap.data().ids || [] : [];
+                return ids;
+            } catch (e) {
+                console.error("Error fetching admin IDs:", e);
+                return [];
+            }
+        }
+        
+        /**
+         * Inicializa los slots y el estado del juego si no existen.
+         */
+        async function initializeSlotsAndState(firestore) {
+            const batch = writeBatch(firestore);
+            let allSlotsExist = true;
+
+            for (let i = 1; i <= NUM_SLOTS; i++) {
+                const slotRef = doc(firestore, COLLECTION_PATH, i.toString());
+                const docSnap = await getDoc(slotRef);
+
+                if (!docSnap.exists()) {
+                    allSlotsExist = false;
+                    const initialSlotData = {
+                        id: i,
+                        playerName: '',
+                        reservedBy: null, 
+                        reservationTime: null,
+                        paymentStatus: 'reserved',
+                        paymentProofUrl: null, // Nuevo campo
+                    };
+                    batch.set(slotRef, initialSlotData);
+                }
+            }
+            
+            if (!allSlotsExist) {
+                await batch.commit();
+                console.log("Slots de juego inicializados.");
+            }
+            
+            const stateRef = doc(firestore, GAME_STATE_DOC_PATH, 'current');
+            const stateSnap = await getDoc(stateRef);
+            if (!stateSnap.exists()) {
+                await setDoc(stateRef, { gameNumber: 1 });
+            }
+        }
+
+        /**
+         * Maneja la lógica de reserva.
+         */
+        async function handleReserveSlot(slotNumber, playerName) {
+            if (!state.db || !state.userId) {
+                updateState({ message: "Error: No autenticado o DB no lista." });
+                return;
+            }
+
+            const slotRef = doc(state.db, COLLECTION_PATH, slotNumber.toString());
+            const batch = writeBatch(state.db);
+
+            try {
+                const slotSnap = await getDoc(slotRef);
+                const currentSlot = slotSnap.data();
+
+                if (currentSlot && currentSlot.reservedBy) {
+                    updateState({ message: `La ficha ${slotNumber} ya fue reservada por ${currentSlot.playerName}.`, selectedSlot: null });
+                    return;
+                }
+                
+                const reservationData = {
+                    id: slotNumber,
+                    playerName: playerName,
+                    reservedBy: state.userId, 
+                    reservationTime: new Date().toISOString(),
+                    paymentStatus: 'pending',
+                    paymentProofUrl: null, // Asegura que empiece en null
+                };
+                
+                batch.set(slotRef, reservationData, { merge: true });
+                await batch.commit();
+
+                updateState({ message: `¡Ficha ${slotNumber} reservada! Sube tu comprobante.`, selectedSlot: null });
+                closeModal();
+            } catch (error) {
+                console.error("Error al intentar reservar:", error);
+                updateState({ message: `Error al reservar la ficha ${slotNumber}. Intenta de nuevo.` });
+            }
+        }
+
+        /**
+         * Sube la URL del comprobante de pago.
+         */
+        async function handleUploadPaymentProof(slotNumber, url) {
+            if (!state.db || !state.userId) return;
+
+            const slotRef = doc(state.db, COLLECTION_PATH, slotNumber.toString());
+            
+            try {
+                await updateDoc(slotRef, { 
+                    paymentProofUrl: url,
+                    paymentStatus: 'pending', // Asegura que siga en pendiente
+                });
+                updateState({ message: `Comprobante de Ficha ${slotNumber} enviado. Esperando aprobación del admin.`, selectedSlot: null });
+            } catch (error) {
+                console.error("Error al subir comprobante:", error);
+                updateState({ message: `Error al subir comprobante: ${error.message}` });
+            }
+        }
+
+        /**
+         * Lógica de Reinicio de Partida (Admin)
+         */
+        async function handleResetGame() {
+            if (!state.db || !state.isAdmin) return;
+            updateState({ loading: true, message: '' });
+
+            const batch = writeBatch(state.db);
+            const stateRef = doc(state.db, GAME_STATE_DOC_PATH, 'current');
+            
+            try {
+                for (let i = 1; i <= NUM_SLOTS; i++) {
+                    const slotRef = doc(state.db, COLLECTION_PATH, i.toString());
+                    const resetData = {
+                        playerName: '',
+                        reservedBy: null,
+                        reservationTime: null,
+                        paymentStatus: 'reserved',
+                        paymentProofUrl: null,
+                    };
+                    batch.update(slotRef, resetData);
+                }
+                
+                const stateSnap = await getDoc(stateRef);
+                const currentNumber = stateSnap.exists() ? stateSnap.data().gameNumber : 0;
+                batch.set(stateRef, { gameNumber: currentNumber + 1 }, { merge: true });
+                
+                await batch.commit();
+                
+                updateState({ message: `¡Partida reiniciada! Nueva Partida # ${currentNumber + 1}.`, loading: false });
+            } catch (error) {
+                console.error("Error al reiniciar la partida:", error);
+                updateState({ message: `Error al reiniciar: ${error.message}`, loading: false });
+            }
+        }
+
+        /**
+         * Lógica de Actualización de Pago (Admin)
+         */
+        async function handleUpdatePayment(slotNumber, newStatus) {
+            if (!state.db || !state.isAdmin) return;
+
+            const slotRef = doc(state.db, COLLECTION_PATH, slotNumber.toString());
+            
+            try {
+                await updateDoc(slotRef, { paymentStatus: newStatus });
+                updateState({ message: `Ficha ${slotNumber} actualizada a estado: ${newStatus.toUpperCase()}.` });
+            } catch (error) {
+                console.error("Error al actualizar pago:", error);
+                updateState({ message: `Error al actualizar pago: ${error.message}` });
+            }
+        }
+
+
+        // --- INICIALIZACIÓN DE LA APLICACIÓN ---
+        
+        window.onload = function() {
+            if (Object.keys(firebaseConfig).length === 0) {
+                console.error("Firebase config no está definida.");
+                updateState({ loading: false, message: "Error de configuración de Firebase." });
+                return;
+            }
+
+            try {
+                const app = initializeApp(firebaseConfig);
+                const firestore = getFirestore(app);
+                const authInstance = getAuth(app);
+                
+                updateState({ db: firestore, auth: authInstance, route: window.location.hash || '#' }, false);
+
+                // 1. Autenticación
+                const signIn = async () => {
+                    try {
+                        if (initialAuthToken) {
+                            await signInWithCustomToken(authInstance, initialAuthToken);
+                        } else {
+                            await signInAnonymously(authInstance);
+                        }
+                    } catch (error) {
+                        console.error("Error al iniciar sesión:", error);
+                    }
+                };
+                signIn();
+
+                // 2. Listener de Autenticación
+                onAuthStateChanged(authInstance, async (user) => {
+                    if (user) {
+                        const currentUserId = user.uid;
+                        
+                        // 3. Traer IDs de Administrador de Firestore
+                        const adminIds = await fetchAdminUserIds(firestore);
+                        const isAdmin = adminIds.includes(currentUserId);
+                        
+                        updateState({ userId: currentUserId, adminUserIds: adminIds, isAdmin: isAdmin }, false);
+                        
+                        // 4. Inicializar slots y Listener de Firestore
+                        await initializeSlotsAndState(firestore);
+                        
+                        const q = collection(firestore, COLLECTION_PATH);
+
+                        onSnapshot(q, (snapshot) => {
+                            const fetchedSlots = [];
+                            snapshot.forEach((doc) => {
+                                fetchedSlots.push(doc.data());
+                            });
+                            
+                            const sortedSlots = fetchedSlots.sort((a, b) => a.id - b.id);
+                            const completeSlots = Array.from({ length: NUM_SLOTS }, (_, i) => {
+                                const existing = sortedSlots.find(s => s.id === i + 1);
+                                if (existing) return existing;
+                                return {
+                                    id: i + 1, playerName: '', reservedBy: null, reservationTime: null, paymentStatus: 'reserved', paymentProofUrl: null
+                                };
+                            });
+
+                            updateState({ slots: completeSlots, loading: false });
+                        }, (error) => {
+                            console.error("Error en el listener de Firestore:", error);
+                            updateState({ message: `Error en tiempo real: ${error.message}` });
+                        });
+                        
+                    } else {
+                        updateState({ userId: null, isAdmin: false, loading: false });
+                    }
+                });
+
+            } catch (e) {
+                console.error("Error al inicializar la aplicación:", e);
+                updateState({ loading: false, message: `Error fatal de inicio: ${e.message}` });
+            }
+        };
+    </script>
+</body>
+</html>
+
