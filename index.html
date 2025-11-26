@@ -46,27 +46,20 @@
         setLogLevel('debug');
         
         // --- CONFIGURACIÓN DE CONSTANTES GLOBALES Y UTILIDADES ---
-       // Import the functions you need from the SDKs you need
-import { initializeApp } from "firebase/app";
-// TODO: Add SDKs for Firebase products that you want to use
-// https://firebase.google.com/docs/web/setup#available-libraries
-
-// Your web app's Firebase configuration
-const firebaseConfig = {
-  apiKey: "AIzaSyDWZj-48c811N_cyJVZheSEG-hhX5mYkos",
-  authDomain: "omegalineas.firebaseapp.com",
-  projectId: "omegalineas",
-  storageBucket: "omegalineas.firebasestorage.app",
-  messagingSenderId: "211648014130",
-  appId: "1:211648014130:web:02826080e183158873d92b"
-};
-
-// Initialize Firebase
-const app = initializeApp(firebaseConfig);
         
         // Variables globales proporcionadas por el entorno de Canvas (MANDATORIO USAR)
         const appId = typeof __app_id !== 'undefined' ? __app_id : 'bingo-lineas-app';
-        const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+        // CORRECCIÓN: Usamos la configuración directamente en el código. 
+        // Si usas un entorno de Canvas que inyecta __firebase_config, ajusta esta línea.
+        // Asumo que quieres usar la config que proveíste:
+        const firebaseConfig = {
+          apiKey: "AIzaSyDWZj-48c811N_cyJVZheSEG-hhX5mYkos",
+          authDomain: "omegalineas.firebaseapp.com",
+          projectId: "omegalineas",
+          storageBucket: "omegalineas.firebasestorage.app",
+          messagingSenderId: "211648014130",
+          appId: "1:211648014130:web:02826080e183158873d92b"
+        };
         const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
 
         // Rutas de Firestore
