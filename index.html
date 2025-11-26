@@ -55,9 +55,11 @@
         // Rutas de Firestore
         const COLLECTION_PATH = `artifacts/${appId}/public/data/bingo_slots`;
         const GAME_STATE_DOC_PATH = `artifacts/${appId}/public/data/game_state`;
-        const ADMIN_LIST_DOC_PATH = `artifacts/${appId}/public/data/admins`; // Nueva ruta para administradores
+        const ADMIN_LIST_DOC_PATH = `artifacts/${appId}/public/data/admins`; 
         
         const NUM_SLOTS = 15;
+        // Limite máximo de archivo para asegurar que no se exceda el límite de 1MB de Firestore
+        const MAX_IMAGE_SIZE_BYTES = 750 * 1024; // 750 KB
         
         // ** CLAVE SECRETA DE ADMINISTRADOR ** (¡Cámbiala por una clave fuerte!)
         const ADMIN_SECRET_PASSPHRASE = 'CLAVE-SECRETA-BINGO';
@@ -82,6 +84,16 @@
             else if (number >= 61 && number <= 75) { letter = 'O'; color = LETTER_COLORS.O; }
             return { letter, color };
         };
+        
+        /** Convierte un archivo File a una cadena Base64. */
+        function fileToBase64(file) {
+            return new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.readAsDataURL(file);
+                reader.onload = () => resolve(reader.result);
+                reader.onerror = error => reject(error);
+            });
+        }
 
         // --- ESTADO GLOBAL DE LA APLICACIÓN ---
         const state = {
@@ -187,7 +199,6 @@
          * Renderiza el Modal de Reserva
          */
         function renderReservationModal(slotNumber) {
-            const line = WINNING_LINES[slotNumber - 1];
             const modalRoot = $('#modal-root');
 
             const modalHtml = `
@@ -269,24 +280,39 @@
                 <div id="proof-modal" class="fixed inset-0 bg-black/70 z-50 flex items-center justify-center p-4">
                     <div class="bg-white p-6 rounded-2xl w-full max-w-sm shadow-2xl modal-animate" id="modal-content">
                         <h3 class="text-2xl font-bold mb-2 text-yellow-700">Subir Captura Pago (Ficha ${slotNumber})</h3>
-                        <p class="text-sm text-gray-600 mb-4">Pega la URL pública (ej: Imgur, Drive, etc.) de tu comprobante de pago.</p>
+                        <p class="text-sm text-gray-600 mb-4">Adjunta la captura de pantalla de tu comprobante de pago.</p>
                         
                         <form id="proof-form">
-                            <label for="proofUrl" class="block text-sm font-medium text-gray-700 mb-2">URL del Comprobante</label>
+                            <label for="proofFile" class="block text-sm font-medium text-gray-700 mb-2">
+                                Seleccionar Captura (Máx 750KB)
+                            </label>
                             <input
-                                id="proofUrl"
-                                type="url"
+                                id="proofFile"
+                                type="file"
+                                accept="image/*"
                                 required
-                                placeholder="https://ejemplo.com/captura.png"
-                                class="w-full p-3 border border-gray-300 rounded-lg focus:ring-yellow-500 focus:border-yellow-500 text-gray-800"
-                                value="${slot.paymentProofUrl || ''}"
+                                class="w-full text-sm text-gray-800
+                                       file:mr-4 file:py-2 file:px-4
+                                       file:rounded-full file:border-0
+                                       file:text-sm file:font-semibold
+                                       file:bg-yellow-100 file:text-yellow-700
+                                       hover:file:bg-yellow-200"
                             />
+                            
+                            <div id="preview-container" class="mt-4 pt-4 border-t ${slot.paymentProofBase64 ? '' : 'hidden'}">
+                                <h4 class="text-xs font-semibold text-gray-700 mb-1">Previsualización (Guardada)</h4>
+                                <img id="proof-image-preview" src="${slot.paymentProofBase64 || ''}" 
+                                    class="w-full h-auto max-h-40 object-contain border rounded-lg p-1"/>
+                            </div>
+                            
+                            <div id="error-message" class="text-red-500 text-sm mt-2 hidden font-semibold"></div>
+
                             <div class="mt-6 flex justify-between space-x-3">
                                 <button type="button" id="modal-cancel-btn" class="flex-1 px-4 py-2 text-sm font-semibold rounded-lg bg-gray-200 text-gray-700 hover:bg-gray-300 transition">
                                     Cancelar
                                 </button>
-                                <button type="submit" id="modal-confirm-btn" class="flex-1 px-4 py-2 text-sm font-semibold rounded-lg bg-yellow-600 text-white hover:bg-yellow-700 transition disabled:bg-yellow-400 flex items-center justify-center">
-                                    ${slot.paymentProofUrl ? 'Actualizar Comprobante' : 'Enviar Comprobante'}
+                                <button type="submit" id="modal-confirm-btn" class="flex-1 px-4 py-2 text-sm font-semibold rounded-lg bg-yellow-600 text-white hover:bg-yellow-700 transition disabled:bg-yellow-400 flex items-center justify-center" disabled>
+                                    ${slot.paymentProofBase64 ? 'Actualizar Captura' : 'Enviar Captura'}
                                 </button>
                             </div>
                         </form>
@@ -297,23 +323,83 @@
 
             const cancelBtn = $('#modal-cancel-btn');
             const form = $('#proof-form');
-            const proofUrlInput = $('#proofUrl');
+            const fileInput = $('#proofFile');
             const confirmBtn = $('#modal-confirm-btn');
+            const previewContainer = $('#preview-container');
+            const previewImage = $('#proof-image-preview');
+            const errorDiv = $('#error-message');
+            
+            let uploadedBase64 = null; 
+
+            // Habilitar el botón si ya hay un comprobante guardado (para actualizar sin subir uno nuevo)
+            if (slot.paymentProofBase64) {
+                confirmBtn.disabled = false;
+            }
+
+
+            fileInput.addEventListener('change', async (e) => {
+                const file = e.target.files[0];
+                if (!file) {
+                    uploadedBase64 = null;
+                    confirmBtn.disabled = !slot.paymentProofBase64; // Mantener habilitado si ya hay uno guardado
+                    errorDiv.classList.add('hidden');
+                    confirmBtn.textContent = slot.paymentProofBase64 ? 'Actualizar Captura' : 'Enviar Captura';
+                    return;
+                }
+                
+                if (file.size > MAX_IMAGE_SIZE_BYTES) {
+                    uploadedBase64 = null;
+                    confirmBtn.disabled = true;
+                    errorDiv.textContent = 'Error: El archivo es demasiado grande (Máx. 750KB).';
+                    errorDiv.classList.remove('hidden');
+                    previewContainer.classList.add('hidden');
+                    return;
+                }
+
+                errorDiv.classList.add('hidden');
+                confirmBtn.disabled = true;
+                confirmBtn.textContent = 'Procesando...';
+
+                try {
+                    uploadedBase64 = await fileToBase64(file);
+                    
+                    // Actualizar la previsualización con la nueva imagen
+                    previewImage.src = uploadedBase64;
+                    previewContainer.classList.remove('hidden');
+                    
+                    confirmBtn.disabled = false;
+                    confirmBtn.textContent = 'Enviar Captura';
+                } catch (error) {
+                    console.error("Error al convertir a Base64:", error);
+                    errorDiv.textContent = 'Error al cargar la imagen. Intenta con un formato diferente.';
+                    errorDiv.classList.remove('hidden');
+                    confirmBtn.textContent = 'Error';
+                    uploadedBase64 = null;
+                }
+            });
 
             cancelBtn.addEventListener('click', closeModal);
+            
             form.addEventListener('submit', async (e) => {
                 e.preventDefault();
-                const url = proofUrlInput.value.trim();
-                if (url) {
-                    confirmBtn.innerHTML = `
-                        <svg class="animate-spin h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
-                        Enviando...
-                    `;
-                    confirmBtn.disabled = true;
-                    proofUrlInput.disabled = true;
-                    await handleUploadPaymentProof(slotNumber, url);
-                    closeModal();
+                
+                // Si se subió un nuevo archivo, usamos ese Base64. Si no, si ya había uno, lo usamos.
+                const base64Data = uploadedBase64 || slot.paymentProofBase64; 
+                
+                if (!base64Data) {
+                    errorDiv.textContent = 'Debes seleccionar una imagen para enviar.';
+                    errorDiv.classList.remove('hidden');
+                    return;
                 }
+                
+                confirmBtn.innerHTML = `
+                    <svg class="animate-spin h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
+                    Enviando...
+                `;
+                confirmBtn.disabled = true;
+                fileInput.disabled = true;
+                await handleUploadPaymentProof(slotNumber, base64Data);
+                closeModal();
             });
         }
         
@@ -328,7 +414,7 @@
                     <div class="bg-white p-6 rounded-2xl w-full max-w-sm shadow-2xl modal-animate" id="modal-content">
                         <h3 class="text-2xl font-bold mb-2 text-red-700">Acceso Secreto Administrador</h3>
                         <p class="text-sm text-gray-600 mb-4">Ingresa la frase secreta de administrador.</p>
-                        <p class="text-xs text-red-500 mb-4 font-semibold">¡ADVERTENCIA! Esto asocia tu ID de sesión actual (${state.userId.substring(0, 8)}...) como administrador permanente.</p>
+                        <p class="text-xs text-red-500 mb-4 font-semibold">¡ADVERTENCIA! Esto asocia tu ID de sesión actual (${state.userId ? state.userId.substring(0, 8) + '...' : 'cargando...'}) como administrador permanente.</p>
                         
                         <form id="admin-login-form">
                             <label for="adminPassphrase" class="block text-sm font-medium text-gray-700 mb-2">Frase Secreta</label>
@@ -411,8 +497,10 @@
                     default: statusText = 'RESERVADO'; statusColor = 'bg-red-100 text-red-800';
                 }
                 
-                const proofLink = slot.paymentProofUrl ? `
-                    <a href="${slot.paymentProofUrl}" target="_blank" class="text-blue-600 hover:text-blue-800 text-xs font-semibold truncate block max-w-[150px]">
+                // MODIFICADO para usar Base64 como data URL
+                const proofBase64 = slot.paymentProofBase64; 
+                const proofLink = proofBase64 ? `
+                    <a href="${proofBase64}" target="_blank" class="text-blue-600 hover:text-blue-800 text-xs font-semibold truncate block max-w-[150px]">
                         Ver Captura
                     </a>` : `<span class="text-gray-500 text-xs">Sin subir</span>`;
                 
@@ -441,7 +529,7 @@
                                         Desactivar
                                     </button>` 
                                     : `
-                                    <button data-slot-id="${slot.id}" data-status="paid" class="admin-payment-btn text-green-600 hover:text-green-900 text-xs font-semibold" ${!slot.paymentProofUrl ? 'disabled title="Esperando comprobante"' : ''}>
+                                    <button data-slot-id="${slot.id}" data-status="paid" class="admin-payment-btn text-green-600 hover:text-green-900 text-xs font-semibold" ${!slot.paymentProofBase64 ? 'disabled title="Esperando comprobante"' : ''}>
                                         Confirmar
                                     </button>`
                                 }
@@ -512,6 +600,9 @@
                         <h2 class="text-3xl font-black text-red-400 mb-4">Acceso Denegado</h2>
                         <p class="text-gray-300">No tienes privilegios de administrador para ver este panel.</p>
                         <p class="mt-4 text-sm text-gray-500">
+                            Tu ID actual es: <span class="text-yellow-400">${state.userId ? state.userId : 'No autenticado'}</span>
+                        </p>
+                        <p class="mt-4 text-sm text-gray-500">
                             Para volver al modo jugador: 
                             <a href="#" class="text-blue-400 hover:underline font-semibold">Volver a Home</a>
                         </p>
@@ -554,7 +645,7 @@
             let styleClass = 'bg-blue-900/50 border-blue-500 text-blue-300';
             let subMessage = 'Selecciona una ficha disponible (botón gris) para asegurar tu línea.';
             
-            if (!isPlayerView) {
+            if (!isPlayerView && isAdmin) {
                 message = `MODO ADMIN: ${reservedCount} slots reservados.`;
                 styleClass = 'bg-red-900/50 border-red-600 text-red-300';
                 subMessage = 'Control de pagos y reinicio de partida.';
@@ -645,20 +736,21 @@
             } else if (state.route === '#admin' && !state.isAdmin) {
                  content = renderAdminView(); // Muestra el mensaje de acceso denegado
             } else {
+                // Vista de Jugador
                 content = `
                     <header class="text-center mb-8 pt-4">
                         <h1 id="app-title" class="text-4xl font-black text-indigo-400 drop-shadow-lg cursor-pointer">
                             <span class="text-red-500">OMEGA</span> BINGO LÍNEAS 
-                            <span class="${state.clickCount >= 9 ? 'chile-pulse' : ''}">🌶️</span>
+                            <span class="${state.clickCount >= 9 ? 'chile-pulse' : ''} transition-all duration-300">🌶️</span>
                         </h1>
                         <p class="text-gray-400 mt-2 text-sm italic">
                             Total de fichas: ${state.slots.filter(s => s.reservedBy).length} de ${NUM_SLOTS} reservadas.
                         </p>
                         <p class="text-xs mt-1 text-gray-500">
-                            ¡Bienvenido! 
+                            Tu ID: ${state.userId ? state.userId.substring(0, 8) + '...' : 'cargando...'}
                             ${state.isAdmin ? 
-                                `<a href="#admin" class="text-yellow-400 font-bold hover:underline">Ir a Panel Admin</a>` : 
-                                '<span class="text-gray-500 italic">Clic 11 veces en el chile para Admin Login.</span>'
+                                `| <a href="#admin" class="text-yellow-400 font-bold hover:underline">Ir a Panel Admin</a>` : 
+                                '| <span class="text-gray-500 italic">Clic 11 veces en el chile para Admin Login.</span>'
                             }
                         </p>
                     </header>
@@ -693,6 +785,13 @@
                 window.location.hash = '#admin';
                 return;
             }
+            
+            // Si ya está en modo admin (solo activado, no en la ruta), también puede ir a #admin
+            if (state.adminUserIds.includes(state.userId) && state.clickCount < 11) {
+                updateState({ isAdmin: true, route: '#admin' });
+                window.location.hash = '#admin';
+                return;
+            }
 
             let newCount = state.clickCount + 1;
             updateState({ clickCount: newCount }, false); // Actualizar sin re-renderizar todo
@@ -700,14 +799,16 @@
             const titleElement = $('#app-title');
             if (titleElement) {
                 const chileSpan = titleElement.querySelector('span:last-child');
-                if (newCount >= 9) {
-                    chileSpan.classList.add('chile-pulse');
-                    if (newCount === 11) {
-                        updateState({ clickCount: 0 });
-                        renderAdminLoginModal();
+                if (chileSpan) {
+                    if (newCount >= 9) {
+                        chileSpan.classList.add('chile-pulse');
+                        if (newCount === 11) {
+                            updateState({ clickCount: 0 });
+                            renderAdminLoginModal();
+                        }
+                    } else {
+                        chileSpan.classList.remove('chile-pulse');
                     }
-                } else {
-                    chileSpan.classList.remove('chile-pulse');
                 }
             }
         }
@@ -717,9 +818,7 @@
          */
         function attachEventListeners() {
             // Reiniciar el contador de clics al inicio del renderizado (a menos que ya esté cerca del 11)
-            if (state.clickCount < 9 && state.clickCount !== 0) {
-                 updateState({ clickCount: 0 }, false);
-            }
+            // Esto evita que un cambio de ruta o estado reseteen el conteo si el usuario ya casi logra el truco
             
             // 1. Listener para el truco de Admin (Solo en la vista de Jugador)
             if (state.route === '#') {
@@ -813,6 +912,7 @@
                 return;
             }
 
+            // La ruta del documento de administradores es PUBLIC, pero protegida por las reglas de Firestore.
             const adminRef = doc(state.db, ADMIN_LIST_DOC_PATH, 'authorized');
             try {
                 // Añade el ID del usuario actual al array en Firestore
@@ -821,16 +921,19 @@
                 });
                 
                 // Actualiza el estado local y redirige al panel de admin
+                // La lista se actualiza automáticamente por el onSnapshot, pero actualizamos localmente
+                const newAdminIds = [...state.adminUserIds, state.userId];
+                
                 updateState({ 
                     isAdmin: true, 
-                    adminUserIds: [...state.adminUserIds, state.userId],
+                    adminUserIds: newAdminIds,
                     message: "¡Admin Login Exitoso! Accediendo al panel..." 
                 });
                 closeModal();
                 window.location.hash = '#admin';
             } catch (error) {
                 // Esto podría fallar si el documento 'authorized' no existe. Lo creamos.
-                if (error.code === 'not-found') {
+                if (error.code === 'not-found' || error.message.includes('No document to update')) {
                     await setDoc(adminRef, { ids: [state.userId] });
                     updateState({ 
                         isAdmin: true, 
@@ -841,7 +944,7 @@
                     window.location.hash = '#admin';
                 } else {
                     console.error("Error al conceder acceso admin:", error);
-                    updateState({ message: "Error al intentar conceder acceso admin." });
+                    updateState({ message: "Error al intentar conceder acceso admin. (Ver consola)" });
                 }
             }
         }
@@ -852,11 +955,13 @@
         async function fetchAdminUserIds(firestore) {
             const adminRef = doc(firestore, ADMIN_LIST_DOC_PATH, 'authorized');
             try {
+                // Intentamos leer la lista de administradores
                 const docSnap = await getDoc(adminRef);
                 const ids = docSnap.exists() ? docSnap.data().ids || [] : [];
                 return ids;
             } catch (e) {
-                console.error("Error fetching admin IDs:", e);
+                // Si falla (por ejemplo, si las reglas de seguridad no permiten la lectura), asumimos que no hay admins
+                console.warn("Advertencia: No se pudo leer la lista de administradores. (Esto es normal si aún no existe el documento o por reglas de seguridad).", e.message);
                 return [];
             }
         }
@@ -880,7 +985,7 @@
                         reservedBy: null, 
                         reservationTime: null,
                         paymentStatus: 'reserved',
-                        paymentProofUrl: null, // Nuevo campo
+                        paymentProofBase64: null,
                     };
                     batch.set(slotRef, initialSlotData);
                 }
@@ -911,13 +1016,8 @@
             const batch = writeBatch(state.db);
 
             try {
-                const slotSnap = await getDoc(slotRef);
-                const currentSlot = slotSnap.data();
-
-                if (currentSlot && currentSlot.reservedBy) {
-                    updateState({ message: `La ficha ${slotNumber} ya fue reservada por ${currentSlot.playerName}.`, selectedSlot: null });
-                    return;
-                }
+                // NOTA: La validación de que el slot esté libre se hará en las reglas de seguridad de Firestore
+                // para evitar condiciones de carrera. Aquí solo preparamos los datos.
                 
                 const reservationData = {
                     id: slotNumber,
@@ -925,7 +1025,7 @@
                     reservedBy: state.userId, 
                     reservationTime: new Date().toISOString(),
                     paymentStatus: 'pending',
-                    paymentProofUrl: null, // Asegura que empiece en null
+                    paymentProofBase64: null,
                 };
                 
                 batch.set(slotRef, reservationData, { merge: true });
@@ -935,22 +1035,23 @@
                 closeModal();
             } catch (error) {
                 console.error("Error al intentar reservar:", error);
-                updateState({ message: `Error al reservar la ficha ${slotNumber}. Intenta de nuevo.` });
+                // Aquí el error puede ser por una reserva previa o por reglas de seguridad
+                updateState({ message: `Error al reservar la ficha ${slotNumber}. Puede que ya esté reservada. (Ver consola)` });
             }
         }
 
         /**
-         * Sube la URL del comprobante de pago.
+         * Sube la cadena Base64 del comprobante de pago.
          */
-        async function handleUploadPaymentProof(slotNumber, url) {
+        async function handleUploadPaymentProof(slotNumber, base64Data) {
             if (!state.db || !state.userId) return;
 
             const slotRef = doc(state.db, COLLECTION_PATH, slotNumber.toString());
             
             try {
                 await updateDoc(slotRef, { 
-                    paymentProofUrl: url,
-                    paymentStatus: 'pending', // Asegura que siga en pendiente
+                    paymentProofBase64: base64Data,
+                    paymentStatus: 'pending',
                 });
                 updateState({ message: `Comprobante de Ficha ${slotNumber} enviado. Esperando aprobación del admin.`, selectedSlot: null });
             } catch (error) {
@@ -970,6 +1071,11 @@
             const stateRef = doc(state.db, GAME_STATE_DOC_PATH, 'current');
             
             try {
+                // Obtener el número de juego actual para incrementarlo
+                const stateSnap = await getDoc(stateRef);
+                const currentNumber = stateSnap.exists() ? stateSnap.data().gameNumber : 0;
+                
+                // 1. Resetear todos los slots
                 for (let i = 1; i <= NUM_SLOTS; i++) {
                     const slotRef = doc(state.db, COLLECTION_PATH, i.toString());
                     const resetData = {
@@ -977,13 +1083,12 @@
                         reservedBy: null,
                         reservationTime: null,
                         paymentStatus: 'reserved',
-                        paymentProofUrl: null,
+                        paymentProofBase64: null,
                     };
                     batch.update(slotRef, resetData);
                 }
                 
-                const stateSnap = await getDoc(stateRef);
-                const currentNumber = stateSnap.exists() ? stateSnap.data().gameNumber : 0;
+                // 2. Incrementar el contador de partida
                 batch.set(stateRef, { gameNumber: currentNumber + 1 }, { merge: true });
                 
                 await batch.commit();
@@ -1052,11 +1157,29 @@
                         const adminIds = await fetchAdminUserIds(firestore);
                         const isAdmin = adminIds.includes(currentUserId);
                         
+                        // NOTA: Mantenemos el estado de `isAdmin` en la UI sincronizado con la lista de Firestore.
                         updateState({ userId: currentUserId, adminUserIds: adminIds, isAdmin: isAdmin }, false);
                         
                         // 4. Inicializar slots y Listener de Firestore
                         await initializeSlotsAndState(firestore);
                         
+                        // Listener para la lista de administradores
+                        onSnapshot(doc(firestore, ADMIN_LIST_DOC_PATH, 'authorized'), (docSnap) => {
+                            const updatedAdminIds = docSnap.exists() ? docSnap.data().ids || [] : [];
+                            const updatedIsAdmin = updatedAdminIds.includes(state.userId);
+                            
+                            updateState({ adminUserIds: updatedAdminIds, isAdmin: updatedIsAdmin });
+                            
+                            // Si el usuario es admin y no está en la ruta admin, lo redirigimos (solo si es la primera vez)
+                            if (updatedIsAdmin && state.route === '#') {
+                                // No redirigir automáticamente aquí para no ser intrusivo. 
+                                // El usuario debe usar el enlace o el truco.
+                            }
+                        }, (error) => {
+                            console.warn("Advertencia: Falló el listener de admins. Las reglas de seguridad pueden estar restringiendo la lectura.", error.message);
+                        });
+
+                        // Listener para los slots del juego
                         const q = collection(firestore, COLLECTION_PATH);
 
                         onSnapshot(q, (snapshot) => {
@@ -1069,8 +1192,9 @@
                             const completeSlots = Array.from({ length: NUM_SLOTS }, (_, i) => {
                                 const existing = sortedSlots.find(s => s.id === i + 1);
                                 if (existing) return existing;
+                                // Datos de slot iniciales de respaldo
                                 return {
-                                    id: i + 1, playerName: '', reservedBy: null, reservationTime: null, paymentStatus: 'reserved', paymentProofUrl: null
+                                    id: i + 1, playerName: '', reservedBy: null, reservationTime: null, paymentStatus: 'reserved', paymentProofBase64: null
                                 };
                             });
 
@@ -1081,6 +1205,7 @@
                         });
                         
                     } else {
+                        // El usuario no está autenticado, pero aún podemos mostrar la interfaz
                         updateState({ userId: null, isAdmin: false, loading: false });
                     }
                 });
