@@ -4,9 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Bingo de Líneas Colaborativo</title>
-    <!-- Carga de Tailwind CSS CDN -->
     <script src="https://cdn.tailwindcss.com"></script>
-    <!-- Configuración de fuente Inter -->
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@100..900&display=swap');
         body {
@@ -27,14 +25,16 @@
             0%, 100% { opacity: 1; }
             50% { opacity: 0.5; }
         }
+        /* Clase para slots-grid para forzar un tamaño uniforme en los botones */
+        .slot-button-container {
+            height: 150px; /* Tamaño fijo para evitar que se achiquen */
+        }
     </style>
 </head>
 <body>
     <div id="app" class="min-h-screen p-4 sm:p-6 md:p-8">
-        <!-- Contenido principal cargado por JS -->
-    </div>
+        </div>
 
-    <!-- Modal Container -->
     <div id="modal-root"></div>
 
     <script type="module">
@@ -46,6 +46,22 @@
         setLogLevel('debug');
         
         // --- CONFIGURACIÓN DE CONSTANTES GLOBALES Y UTILIDADES ---
+        
+        // ** V A R I A B L E S   D E   C O N F I G U R A C I Ó N **
+        // SI NO ESTÁS EN UN ENTORNO CON VARIABLES GLOBALES (__app_id, __firebase_config, etc.),
+        // DEBES DESCOMENTAR Y PEGAR TU CONFIGURACIÓN DE FIREBASE AQUÍ:
+        /*
+        const appId = 'bingo-lineas-app'; // Un ID único para tu juego
+        const firebaseConfig = {
+             apiKey: "TU_API_KEY_AQUI",
+             authDomain: "TU_AUTH_DOMAIN_AQUI",
+             projectId: "TU_PROJECT_ID_AQUI",
+             storageBucket: "TU_STORAGE_BUCKET_AQUI",
+             messagingSenderId: "TU_MESSAGING_SENDER_ID_AQUI",
+             appId: "TU_APP_ID_AQUI"
+        };
+        const initialAuthToken = null;
+        */
         
         // Variables globales proporcionadas por el entorno de Canvas (MANDATORIO USAR)
         const appId = typeof __app_id !== 'undefined' ? __app_id : 'bingo-lineas-app';
@@ -144,8 +160,12 @@
                 }
             }
 
-            const baseStyle = 'p-2 rounded-xl text-center font-extrabold transition-all duration-300 transform shadow-md relative';
+            // APLICACIÓN DE CLASE PARA TAMAÑO FIJO (slot-button-container)
+            const baseStyle = 'p-2 rounded-xl text-center font-extrabold transition-all duration-300 transform shadow-md relative h-full flex flex-col justify-between';
             const cursorClass = isReserved && !isOwnSlot ? 'cursor-default' : 'hover:scale-[1.02] active:scale-95 cursor-pointer';
+            
+            // Límite de 20 caracteres para el nombre del jugador en la vista de slot
+            const playerNameDisplay = slot.playerName ? slot.playerName.substring(0, 20) + (slot.playerName.length > 20 ? '...' : '') : "¡RESERVAR!";
 
             return `
                 <button 
@@ -157,13 +177,13 @@
                         <span class="text-sm font-light">Ficha ${slot.id}</span>
                         ${isReserved ? 
                             `<span class="text-xs font-semibold ${slot.paymentStatus === 'pending' ? 'text-gray-900' : 'text-white'}">
-                                ${isOwnSlot ? "¡TUYA!" : slot.playerName.substring(0, 10) + (slot.playerName.length > 10 ? '...' : '')}
+                                ${isOwnSlot ? "¡TUYA!" : 'Jugador'}
                             </span>` 
                             : ''
                         }
                     </div>
-                    <div class="text-xl tracking-wider mb-2">
-                        ${isReserved ? slot.playerName : "¡RESERVAR!"}
+                    <div class="text-xl tracking-wider mb-2 flex-grow flex items-center justify-center">
+                        ${playerNameDisplay}
                     </div>
                     <div class="flex justify-center space-x-0.5">
                         ${line.map(num => {
@@ -260,7 +280,7 @@
                     confirmBtn.disabled = true;
                     playerNameInput.disabled = true;
                     await handleReserveSlot(slotNumber, name);
-                    // handleReserveSlot calls closeModal internally
+                    closeModal(); // Aseguramos que se cierre después de la operación
                 }
             });
         }
@@ -454,6 +474,7 @@
 
                 if (passphrase === ADMIN_SECRET_PASSPHRASE) {
                     await handleAdminLogin();
+                    // handleAdminLogin ahora llama a closeModal internamente
                 } else {
                     confirmBtn.textContent = 'Clave Incorrecta';
                     passphraseInput.value = '';
@@ -580,7 +601,7 @@
                 ${infoCard}
 
                 <div id="slots-grid" class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
-                    ${state.slots.map(renderSlotButton).join('')}
+                    ${state.slots.map(slot => `<div class="slot-button-container">${renderSlotButton(slot)}</div>`).join('')}
                 </div>
 
                 ${reservationTable}
@@ -600,7 +621,7 @@
                         <h2 class="text-3xl font-black text-red-400 mb-4">Acceso Denegado</h2>
                         <p class="text-gray-300">No tienes privilegios de administrador para ver este panel.</p>
                         <p class="mt-4 text-sm text-gray-500">
-                            Tu ID actual es: <span class="text-yellow-400">${state.userId ? state.userId : 'No autenticado'}</span>
+                            Tu ID actual es: <span class="text-yellow-400">${state.userId ? state.userId.substring(0, 8) + '...' : 'cargando...'}</span>
                         </p>
                         <p class="mt-4 text-sm text-gray-500">
                             Para volver al modo jugador: 
@@ -786,13 +807,6 @@
                 return;
             }
             
-            // Si ya está en modo admin (solo activado, no en la ruta), también puede ir a #admin
-            if (state.adminUserIds.includes(state.userId) && state.clickCount < 11) {
-                updateState({ isAdmin: true, route: '#admin' });
-                window.location.hash = '#admin';
-                return;
-            }
-
             let newCount = state.clickCount + 1;
             updateState({ clickCount: newCount }, false); // Actualizar sin re-renderizar todo
             
@@ -817,9 +831,6 @@
          * Inicializa todos los listeners del DOM.
          */
         function attachEventListeners() {
-            // Reiniciar el contador de clics al inicio del renderizado (a menos que ya esté cerca del 11)
-            // Esto evita que un cambio de ruta o estado reseteen el conteo si el usuario ya casi logra el truco
-            
             // 1. Listener para el truco de Admin (Solo en la vista de Jugador)
             if (state.route === '#') {
                 const title = $('#app-title');
@@ -905,6 +916,7 @@
         
         /**
          * Intenta dar acceso de administrador al usuario actual si la clave secreta fue correcta.
+         * CORRECCIÓN: Asegurar el redireccionamiento y cierre de modal.
          */
         async function handleAdminLogin() {
             if (!state.db || !state.userId) {
@@ -912,7 +924,6 @@
                 return;
             }
 
-            // La ruta del documento de administradores es PUBLIC, pero protegida por las reglas de Firestore.
             const adminRef = doc(state.db, ADMIN_LIST_DOC_PATH, 'authorized');
             try {
                 // Añade el ID del usuario actual al array en Firestore
@@ -921,24 +932,22 @@
                 });
                 
                 // Actualiza el estado local y redirige al panel de admin
-                // La lista se actualiza automáticamente por el onSnapshot, pero actualizamos localmente
-                const newAdminIds = [...state.adminUserIds, state.userId];
-                
                 updateState({ 
                     isAdmin: true, 
-                    adminUserIds: newAdminIds,
-                    message: "¡Admin Login Exitoso! Accediendo al panel..." 
+                    adminUserIds: [...state.adminUserIds, state.userId],
+                    message: "¡Admin Login Exitoso! Accediendo al panel...",
+                    route: '#admin'
                 });
                 closeModal();
                 window.location.hash = '#admin';
             } catch (error) {
-                // Esto podría fallar si el documento 'authorized' no existe. Lo creamos.
                 if (error.code === 'not-found' || error.message.includes('No document to update')) {
                     await setDoc(adminRef, { ids: [state.userId] });
                     updateState({ 
                         isAdmin: true, 
                         adminUserIds: [state.userId],
-                        message: "¡Admin Login Exitoso! Documento admin creado y accediendo al panel..." 
+                        message: "¡Admin Login Exitoso! Documento admin creado y accediendo al panel...",
+                        route: '#admin'
                     });
                     closeModal();
                     window.location.hash = '#admin';
@@ -1031,8 +1040,12 @@
                 batch.set(slotRef, reservationData, { merge: true });
                 await batch.commit();
 
-                updateState({ message: `¡Ficha ${slotNumber} reservada! Sube tu comprobante.`, selectedSlot: null });
-                closeModal();
+                // CORRECCIÓN: Mostrar el modal de comprobante inmediatamente después de reservar
+                updateState({ 
+                    message: `¡Ficha ${slotNumber} reservada! Sube tu comprobante.`, 
+                    selectedSlot: slotNumber // Mantiene el slot seleccionado para abrir el modal de pago
+                });
+                
             } catch (error) {
                 console.error("Error al intentar reservar:", error);
                 // Aquí el error puede ser por una reserva previa o por reglas de seguridad
@@ -1122,9 +1135,9 @@
         
         window.onload = function() {
             if (Object.keys(firebaseConfig).length === 0) {
-                console.error("Firebase config no está definida.");
-                updateState({ loading: false, message: "Error de configuración de Firebase." });
-                return;
+                console.error("Firebase config no está definida o está vacía. Favor revisar.");
+                // Si la configuración de Firebase está vacía, se asume que se deben usar los valores del entorno de ejecución.
+                // Si no, se debe descomentar la sección de configuración de Firebase en el código.
             }
 
             try {
@@ -1158,7 +1171,12 @@
                         const isAdmin = adminIds.includes(currentUserId);
                         
                         // NOTA: Mantenemos el estado de `isAdmin` en la UI sincronizado con la lista de Firestore.
-                        updateState({ userId: currentUserId, adminUserIds: adminIds, isAdmin: isAdmin }, false);
+                        updateState({ 
+                            userId: currentUserId, 
+                            adminUserIds: adminIds, 
+                            isAdmin: isAdmin, 
+                            loading: false // Establecer loading a false aquí
+                        }, false);
                         
                         // 4. Inicializar slots y Listener de Firestore
                         await initializeSlotsAndState(firestore);
@@ -1169,12 +1187,6 @@
                             const updatedIsAdmin = updatedAdminIds.includes(state.userId);
                             
                             updateState({ adminUserIds: updatedAdminIds, isAdmin: updatedIsAdmin });
-                            
-                            // Si el usuario es admin y no está en la ruta admin, lo redirigimos (solo si es la primera vez)
-                            if (updatedIsAdmin && state.route === '#') {
-                                // No redirigir automáticamente aquí para no ser intrusivo. 
-                                // El usuario debe usar el enlace o el truco.
-                            }
                         }, (error) => {
                             console.warn("Advertencia: Falló el listener de admins. Las reglas de seguridad pueden estar restringiendo la lectura.", error.message);
                         });
@@ -1218,4 +1230,3 @@
     </script>
 </body>
 </html>
-
