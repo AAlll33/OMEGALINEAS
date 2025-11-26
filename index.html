@@ -1,3 +1,12 @@
+<body>
+    <div id="app" class="max-w-4xl mx-auto p-4">
+        </div>
+    <div id="modal-root"></div>
+
+    <script type="module">
+        // ... Tu código JavaScript completo va aquí ...
+    </script>
+</body>
     <div id="modal-root"></div>
 
     <script type="module">
@@ -1096,8 +1105,6 @@
         window.onload = function() {
             if (Object.keys(firebaseConfig).length === 0) {
                 console.error("Firebase config no está definida o está vacía. Favor revisar.");
-                // Si la configuración de Firebase está vacía, se asume que se deben usar los valores del entorno de ejecución.
-                // Si no, se debe descomentar la sección de configuración de Firebase en el código.
             }
 
             try {
@@ -1135,7 +1142,6 @@
                             userId: currentUserId, 
                             adminUserIds: adminIds, 
                             isAdmin: isAdmin, 
-                            loading: false // Establecer loading a false aquí
                         }, false);
                         
                         // 4. Inicializar slots y Listener de Firestore
@@ -1178,8 +1184,11 @@
                         
                     } else {
                         // El usuario no está autenticado, pero aún podemos mostrar la interfaz
-                        updateState({ userId: null, isAdmin: false, loading: false });
+                        updateState({ userId: null, isAdmin: false });
                     }
+                    
+                    // Ajuste: Aseguramos que el estado de carga se desactive después del intento de autenticación
+                    updateState({ loading: false });
                 });
 
             } catch (e) {
